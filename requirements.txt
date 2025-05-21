@@ -6,4 +6,6 @@ langchain==0.1.9
 langchain-groq==0.1.5
 pdfplumber==0.10.3
 pdf2image==1.17.0
-pytesseract==0.3.10 
+pytesseract==0.3.10
+openai>=1.10.0
+requests>=2.31.0 

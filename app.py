@@ -23,12 +23,27 @@ import tempfile
 from dotenv import load_dotenv
 from groq import Groq
 from typing import List, Dict, Tuple
-from config import get_api_key
+from config import get_api_key, get_groq_api_key, get_openai_api_key, get_ollama_host
 import pdfplumber
 import io
 import re
 import time
 import logging
+
+# For OpenAI API integration
+try:
+    import openai
+    from openai import OpenAI
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
+
+# For Ollama integration
+try:
+    import requests
+    OLLAMA_AVAILABLE = True
+except ImportError:
+    OLLAMA_AVAILABLE = False
 
 # Configure logging
 logging.basicConfig(
@@ -43,15 +58,30 @@ logger = logging.getLogger('pdf_mcq_generator')
 # Load environment variables
 load_dotenv()
 
-# API key management - initialize session state if needed
+# Initialize session state for config
 if 'groq_api_key' not in st.session_state:
     st.session_state.groq_api_key = ""
-    st.session_state.api_key_valid = False
+    st.session_state.groq_api_key_valid = False
     st.session_state.groq_client = None
     
-    # Digital signature (DO NOT REMOVE - required for app functionality)
-    st.session_state.author_signature = "github.com/your-username/your-repo"
-    st.session_state.creation_date = "2024"
+if 'openai_api_key' not in st.session_state:
+    st.session_state.openai_api_key = ""
+    st.session_state.openai_api_key_valid = False
+    st.session_state.openai_client = None
+    
+if 'ollama_host' not in st.session_state:
+    st.session_state.ollama_host = "http://localhost:11434"
+    st.session_state.ollama_host_valid = False
+
+if 'active_provider' not in st.session_state:
+    st.session_state.active_provider = "groq"  # Default provider
+
+if 'api_key_valid' not in st.session_state:
+    st.session_state.api_key_valid = False  # Legacy for backward compatibility
+    
+# For attribution
+st.session_state.author_signature = "github.com/your-username/your-repo"
+st.session_state.creation_date = "2024"
 
 # Get Groq API key
 GROQ_API_KEY = get_api_key()
@@ -131,7 +161,56 @@ def validate_api_key(api_key):
         # If we got a response without error, the key is valid
         return True
     except Exception as e:
-        logger.error(f"API key validation failed: {str(e)}")
+        logger.error(f"Groq API key validation failed: {str(e)}")
+        return False
+
+def validate_openai_api_key(api_key):
+    """Validate the OpenAI API key by making a simple test request."""
+    if not api_key or len(api_key) < 10:  # Basic length check
+        return False
+        
+    if not OPENAI_AVAILABLE:
+        logger.warning("OpenAI validation skipped - OpenAI package not installed")
+        return False
+        
+    try:
+        # Initialize a test client
+        client = OpenAI(api_key=api_key)
+        
+        # Make a minimal API call to test the key
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",  # Using smaller model for faster validation
+            messages=[{"role": "user", "content": "Hello"}],
+            max_tokens=10,
+        )
+        
+        # If we got a response without error, the key is valid
+        return True
+    except Exception as e:
+        logger.error(f"OpenAI API key validation failed: {str(e)}")
+        return False
+
+def validate_ollama_host(host_url):
+    """Validate the Ollama host by checking connectivity and available models."""
+    if not host_url:  # Basic check
+        return False
+        
+    if not OLLAMA_AVAILABLE:
+        logger.warning("Ollama validation skipped - requests package not installed")
+        return False
+        
+    try:
+        # Make a request to the Ollama API to list models
+        response = requests.get(f"{host_url}/api/tags", timeout=5)
+        
+        # Check if the request was successful
+        if response.status_code == 200:
+            return True
+        else:
+            logger.error(f"Ollama API returned status code: {response.status_code}")
+            return False
+    except Exception as e:
+        logger.error(f"Ollama host validation failed: {str(e)}")
         return False
 
 def extract_text_with_pypdf2(pdf_file) -> str:
@@ -476,14 +555,24 @@ def chunk_text(text, max_chunk_size=3000):
     return chunks
 
 def generate_mcqs(pdf_content: str, num_questions: int = 5, difficulty: str = "Medium") -> str:
-    """Generate MCQs using Groq API."""
+    """Generate MCQs using the selected LLM provider API."""
     global CHUNK_SIZE
     
-    # Get the client from session state
-    client = st.session_state.groq_client
+    # Get the active provider from session state
+    active_provider = st.session_state.active_provider
     
-    # Check if client is initialized
-    if client is None:
+    # Check which provider is active and get the appropriate client
+    client = None
+    if active_provider == "groq" and st.session_state.groq_api_key_valid:
+        client = st.session_state.groq_client
+    elif active_provider == "openai" and st.session_state.openai_api_key_valid:
+        client = st.session_state.openai_client
+    elif active_provider == "ollama" and st.session_state.ollama_host_valid:
+        # Ollama doesn't use a client object like the others
+        pass
+    
+    # For Groq and OpenAI, check if client is initialized
+    if active_provider in ["groq", "openai"] and client is None:
         return "Error: API client is not initialized. Please validate your API key first."
     
     # Chunk the content if too large
@@ -522,16 +611,72 @@ def generate_mcqs(pdf_content: str, num_questions: int = 5, difficulty: str = "M
     """
     
     try:
-        completion = client.chat.completions.create(
-            model=MODEL,
-            messages=[
-                {"role": "system", "content": "You are a brutally honest expert educator specialized in creating university-level examination questions. Your Ultimate goal is to create the most difficult questions possible."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.5,
-            max_tokens=2000,  # Reduced for faster response
-        )
-        return completion.choices[0].message.content
+        if active_provider == "groq":
+            # Use Groq client
+            completion = client.chat.completions.create(
+                model=MODEL,
+                messages=[
+                    {"role": "system", "content": "You are a brutally honest expert educator specialized in creating university-level examination questions. Your Ultimate goal is to create the most difficult questions possible."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.5,
+                max_tokens=2000,
+            )
+            return completion.choices[0].message.content
+            
+        elif active_provider == "openai":
+            # Use OpenAI client
+            completion = client.chat.completions.create(
+                model="gpt-4",  # Using GPT-4 by default
+                messages=[
+                    {"role": "system", "content": "You are a brutally honest expert educator specialized in creating university-level examination questions. Your Ultimate goal is to create the most difficult questions possible."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.5,
+                max_tokens=2000,
+            )
+            return completion.choices[0].message.content
+            
+        elif active_provider == "ollama":
+            # Use requests to call Ollama API
+            if not OLLAMA_AVAILABLE:
+                return "Error: Requests package is not installed. Please install it with `pip install requests`"
+                
+            try:
+                # Get the host URL from session state
+                host_url = st.session_state.ollama_host
+                
+                # Prepare the request payload
+                payload = {
+                    "model": "llama3",  # Default model, can be made configurable
+                    "messages": [
+                        {"role": "system", "content": "You are a brutally honest expert educator specialized in creating university-level examination questions. Your Ultimate goal is to create the most difficult questions possible."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    "stream": False,
+                    "options": {
+                        "temperature": 0.5,
+                    }
+                }
+                
+                # Make the API call
+                response = requests.post(f"{host_url}/api/chat", json=payload, timeout=120)
+                
+                # Check if response is successful
+                if response.status_code == 200:
+                    result = response.json()
+                    return result["message"]["content"]
+                else:
+                    return f"Error: Ollama API returned status code {response.status_code}"
+                    
+            except Exception as e:
+                error_msg = str(e)
+                st.error(f"Ollama API Error: {error_msg}")
+                return f"Error generating MCQs with Ollama: {error_msg}"
+        
+        else:
+            return "Error: No valid LLM provider selected. Please validate an API key first."
+            
     except Exception as e:
         error_msg = str(e)
         st.error(f"API Error: {error_msg}")
@@ -540,54 +685,190 @@ def generate_mcqs(pdf_content: str, num_questions: int = 5, difficulty: str = "M
 def main():
     st.title("📚 PDF to University MCQ Generator")
     
+    # Initialize session state variables for all providers
+    if 'groq_api_key' not in st.session_state:
+        st.session_state.groq_api_key = ""
+        st.session_state.groq_api_key_valid = False
+        
+    if 'openai_api_key' not in st.session_state:
+        st.session_state.openai_api_key = ""
+        st.session_state.openai_api_key_valid = False
+        
+    if 'ollama_host' not in st.session_state:
+        st.session_state.ollama_host = "http://localhost:11434"
+        st.session_state.ollama_host_valid = False
+        
+    if 'active_provider' not in st.session_state:
+        st.session_state.active_provider = "groq"  # Default provider
+        
+    if 'groq_client' not in st.session_state:
+        st.session_state.groq_client = None
+        
+    if 'openai_client' not in st.session_state:
+        st.session_state.openai_client = None
+    
     # API Key input area at the top of the app
     with st.container():
-        st.markdown("### Enter Your Groq API Key")
+        st.markdown("### LLM Provider Configuration")
         
-        # Get the API key from the user
-        api_key_input = st.text_input(
-            "Groq API Key", 
-            value=st.session_state.groq_api_key,
-            type="password",
-            help="Get your API key from https://console.groq.com/keys",
-            key="api_key_input"
-        )
+        # Create tabs for different providers
+        tabs = st.tabs(["Groq", "OpenAI", "Ollama"])
         
-        # Save the API key to session state if it changes
-        if api_key_input != st.session_state.groq_api_key:
-            st.session_state.groq_api_key = api_key_input
-            # Reset validation status when key changes
-            st.session_state.api_key_valid = False
+        # Groq Tab
+        with tabs[0]:
+            st.markdown("#### Groq API Key")
+            
+            # Get the API key from the user
+            groq_api_key_input = st.text_input(
+                "Groq API Key", 
+                value=st.session_state.groq_api_key,
+                type="password",
+                help="Get your API key from https://console.groq.com/keys",
+                key="groq_api_key_input"
+            )
+            
+            # Save the API key to session state if it changes
+            if groq_api_key_input != st.session_state.groq_api_key:
+                st.session_state.groq_api_key = groq_api_key_input
+                # Reset validation status when key changes
+                st.session_state.groq_api_key_valid = False
+                st.session_state.groq_client = None
+            
+            # Set up columns for the buttons
+            col1, col2 = st.columns([1, 3])
+            
+            # Validate button in first column
+            with col1:
+                if st.button("Validate Groq API Key", key="validate_groq", type="primary"):
+                    if validate_api_key(groq_api_key_input):
+                        st.session_state.groq_api_key = groq_api_key_input
+                        st.session_state.groq_api_key_valid = True
+                        st.session_state.active_provider = "groq"
+                        # Initialize the client and store in session state
+                        st.session_state.groq_client = Groq(api_key=groq_api_key_input)
+                        st.success("✅ Groq API key is valid! You can now use the app.")
+                    else:
+                        st.session_state.groq_api_key_valid = False
+                        st.session_state.groq_client = None
+                        st.error("❌ Invalid Groq API key. Please check and try again.")
+            
+            # Help text in second column
+            with col2:
+                st.markdown("""
+                1. Get your API key from [Groq Console](https://console.groq.com/keys)
+                2. Enter it above and click "Validate Groq API Key"
+                3. Once validated, you can use the app to generate MCQs
+                """)
         
-        # Set up columns for the buttons
-        col1, col2 = st.columns([1, 3])
+        # OpenAI Tab
+        with tabs[1]:
+            st.markdown("#### OpenAI API Key")
+            
+            if not OPENAI_AVAILABLE:
+                st.warning("⚠️ OpenAI package is not installed. Please install it with `pip install openai`")
+            
+            # Get the API key from the user
+            openai_api_key_input = st.text_input(
+                "OpenAI API Key", 
+                value=st.session_state.openai_api_key,
+                type="password",
+                help="Get your API key from https://platform.openai.com/api-keys",
+                key="openai_api_key_input"
+            )
+            
+            # Save the API key to session state if it changes
+            if openai_api_key_input != st.session_state.openai_api_key:
+                st.session_state.openai_api_key = openai_api_key_input
+                # Reset validation status when key changes
+                st.session_state.openai_api_key_valid = False
+                st.session_state.openai_client = None
+            
+            # Set up columns for the buttons
+            col1, col2 = st.columns([1, 3])
+            
+            # Validate button in first column
+            with col1:
+                openai_button_disabled = not OPENAI_AVAILABLE
+                if st.button("Validate OpenAI API Key", key="validate_openai", type="primary", disabled=openai_button_disabled):
+                    if validate_openai_api_key(openai_api_key_input):
+                        st.session_state.openai_api_key = openai_api_key_input
+                        st.session_state.openai_api_key_valid = True
+                        st.session_state.active_provider = "openai"
+                        # Initialize the client and store in session state
+                        st.session_state.openai_client = OpenAI(api_key=openai_api_key_input)
+                        st.success("✅ OpenAI API key is valid! You can now use the app.")
+                    else:
+                        st.session_state.openai_api_key_valid = False
+                        st.session_state.openai_client = None
+                        st.error("❌ Invalid OpenAI API key. Please check and try again.")
+            
+            # Help text in second column
+            with col2:
+                st.markdown("""
+                1. Get your API key from [OpenAI Platform](https://platform.openai.com/api-keys)
+                2. Enter it above and click "Validate OpenAI API Key"
+                3. Once validated, you can use the app to generate MCQs
+                """)
         
-        # Validate button in first column
-        with col1:
-            if st.button("Validate API Key", type="primary"):
-                if validate_api_key(api_key_input):
-                    st.session_state.groq_api_key = api_key_input
-                    st.session_state.api_key_valid = True
-                    # Initialize the client and store in session state only
-                    st.session_state.groq_client = Groq(api_key=api_key_input)
-                    st.success("✅ API key is valid! You can now use the app.")
-                else:
-                    st.session_state.api_key_valid = False
-                    st.session_state.groq_client = None
-                    st.error("❌ Invalid API key. Please check and try again.")
-        
-        # Help text in second column
-        with col2:
-            st.markdown("""
-            1. Get your API key from [Groq Console](https://console.groq.com/keys)
-            2. Enter it above and click "Validate API Key"
-            3. Once validated, you can use the app to generate MCQs
-            """)
-        
-        # Display a message if no API key is provided yet
-        if not st.session_state.groq_api_key or not st.session_state.api_key_valid:
-            st.warning("⚠️ Please enter and validate your Groq API key to use this application")
-            st.stop()  # Stop execution if no valid API key
+        # Ollama Tab
+        with tabs[2]:
+            st.markdown("#### Ollama Host Configuration")
+            
+            if not OLLAMA_AVAILABLE:
+                st.warning("⚠️ Requests package is not installed. Please install it with `pip install requests`")
+            
+            # Get the host URL from the user
+            ollama_host_input = st.text_input(
+                "Ollama Host URL", 
+                value=st.session_state.ollama_host,
+                help="Enter your Ollama host URL (default: http://localhost:11434)",
+                key="ollama_host_input"
+            )
+            
+            # Save the host to session state if it changes
+            if ollama_host_input != st.session_state.ollama_host:
+                st.session_state.ollama_host = ollama_host_input
+                # Reset validation status when host changes
+                st.session_state.ollama_host_valid = False
+            
+            # Set up columns for the buttons
+            col1, col2 = st.columns([1, 3])
+            
+            # Validate button in first column
+            with col1:
+                ollama_button_disabled = not OLLAMA_AVAILABLE
+                if st.button("Validate Ollama Host", key="validate_ollama", type="primary", disabled=ollama_button_disabled):
+                    if validate_ollama_host(ollama_host_input):
+                        st.session_state.ollama_host = ollama_host_input
+                        st.session_state.ollama_host_valid = True
+                        st.session_state.active_provider = "ollama"
+                        st.success("✅ Ollama host is valid and connected! You can now use the app.")
+                    else:
+                        st.session_state.ollama_host_valid = False
+                        st.error("❌ Invalid Ollama host. Please check the URL and ensure Ollama is running.")
+            
+            # Help text in second column
+            with col2:
+                st.markdown("""
+                1. Make sure Ollama is running on your local machine or remote server
+                2. Enter the host URL (usually http://localhost:11434 for local installations)
+                3. Click "Validate Ollama Host" to test the connection
+                """)
+    
+    # Check if any provider is validated and active
+    is_any_provider_valid = (
+        (st.session_state.active_provider == "groq" and st.session_state.groq_api_key_valid) or
+        (st.session_state.active_provider == "openai" and st.session_state.openai_api_key_valid) or
+        (st.session_state.active_provider == "ollama" and st.session_state.ollama_host_valid)
+    )
+    
+    if not is_any_provider_valid:
+        st.warning("⚠️ Please validate at least one LLM provider to use this application")
+        st.stop()  # Stop execution if no valid provider
+    
+    # For backward compatibility - update original api_key_valid flag
+    if st.session_state.active_provider == "groq" and st.session_state.groq_api_key_valid:
+        st.session_state.api_key_valid = True
     
     st.markdown("""
     Upload PDF files containing academic content, and this tool will analyze them 
@@ -732,18 +1013,96 @@ def main():
         # Declare global variables first
         global MODEL, CHUNK_SIZE
         
-        model = st.selectbox("Model", 
-                          options=["llama3-70b-8192", "mixtral-8x7b-32768", "gemma-7b-it"], 
-                          index=0,
-                          help="Select the AI model to use")
+        # Select provider first
+        active_provider = st.selectbox("LLM Provider", 
+                          options=["groq", "openai", "ollama"], 
+                          index=0 if st.session_state.active_provider == "groq" else 
+                                1 if st.session_state.active_provider == "openai" else 2,
+                          help="Select the LLM provider to use")
         
-        # Update the MODEL variable based on user selection
-        MODEL = model
+        # Update the active provider in session state
+        st.session_state.active_provider = active_provider
         
-        # Reinitialize client if model changes and we have a valid API key
-        if st.session_state.api_key_valid and st.session_state.groq_api_key:
-            # Create or update the client in session state
-            st.session_state.groq_client = Groq(api_key=st.session_state.groq_api_key)
+        # Model selection based on provider
+        if active_provider == "groq":
+            model = st.selectbox("Groq Model", 
+                              options=["llama3-70b-8192", "mixtral-8x7b-32768", "gemma-7b-it"], 
+                              index=0,
+                              help="Select the Groq model to use")
+            # Update the MODEL variable based on user selection
+            MODEL = model
+            
+            # Reinitialize client if model changes and we have a valid API key
+            if st.session_state.groq_api_key_valid and st.session_state.groq_api_key:
+                # Create or update the client in session state
+                st.session_state.groq_client = Groq(api_key=st.session_state.groq_api_key)
+        
+        elif active_provider == "openai":
+            model = st.selectbox("OpenAI Model", 
+                              options=["gpt-4", "gpt-4-turbo", "gpt-3.5-turbo"], 
+                              index=0,
+                              help="Select the OpenAI model to use")
+            # Update the MODEL variable based on user selection
+            MODEL = model
+            
+            # Reinitialize client if model changes and we have a valid OpenAI key
+            if st.session_state.openai_api_key_valid and st.session_state.openai_api_key:
+                # Create or update the client in session state
+                st.session_state.openai_client = OpenAI(api_key=st.session_state.openai_api_key)
+        
+        elif active_provider == "ollama":
+            model = st.selectbox("Ollama Model", 
+                              options=["llama3", "llama3:8b", "mistral", "llama2", "phi3"], 
+                              index=0,
+                              help="Select the Ollama model to use")
+            # Update the MODEL variable based on user selection
+            MODEL = model
+        
+        # Add a "Test Selected Provider" button
+        if st.button("Test Selected Provider"):
+            # Check which provider is selected and validate it
+            if active_provider == "groq":
+                if st.session_state.groq_api_key_valid:
+                    st.success("✅ Groq API key is valid and ready to use!")
+                elif st.session_state.groq_api_key:
+                    # Try to validate the key
+                    if validate_api_key(st.session_state.groq_api_key):
+                        st.session_state.groq_api_key_valid = True
+                        st.success("✅ Groq API key is valid!")
+                        # Initialize the client
+                        st.session_state.groq_client = Groq(api_key=st.session_state.groq_api_key)
+                    else:
+                        st.error("❌ Invalid Groq API key. Please update it in the configuration tab.")
+                else:
+                    st.warning("⚠️ No Groq API key provided. Please enter it in the configuration tab.")
+                    
+            elif active_provider == "openai":
+                if st.session_state.openai_api_key_valid:
+                    st.success("✅ OpenAI API key is valid and ready to use!")
+                elif st.session_state.openai_api_key:
+                    # Try to validate the key
+                    if validate_openai_api_key(st.session_state.openai_api_key):
+                        st.session_state.openai_api_key_valid = True
+                        st.success("✅ OpenAI API key is valid!")
+                        # Initialize the client
+                        st.session_state.openai_client = OpenAI(api_key=st.session_state.openai_api_key)
+                    else:
+                        st.error("❌ Invalid OpenAI API key. Please update it in the configuration tab.")
+                else:
+                    st.warning("⚠️ No OpenAI API key provided. Please enter it in the configuration tab.")
+                    
+            elif active_provider == "ollama":
+                if st.session_state.ollama_host_valid:
+                    st.success("✅ Ollama host is valid and connected!")
+                elif st.session_state.ollama_host:
+                    # Try to validate the host
+                    if validate_ollama_host(st.session_state.ollama_host):
+                        st.session_state.ollama_host_valid = True
+                        st.success("✅ Ollama host is valid and connected!")
+                    else:
+                        st.error("❌ Invalid Ollama host. Please ensure Ollama is running at the specified host.")
+                else:
+                    st.warning("⚠️ No Ollama host provided. Please enter it in the configuration tab.")
         
         with st.expander("Chunking Settings"):
             st.info("For large PDFs, the content will be split into smaller chunks")
