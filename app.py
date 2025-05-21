@@ -1,7 +1,6 @@
 """
 PDF to University MCQ Generator
-Copyright (c) 2024 [Your Full Name]
-https://github.com/[your-username]/[your-repo]
+Copyright (c) 2024 Ishaan Rai
 
 All rights reserved. This source code is licensed under the MIT license found in the
 LICENSE file in the root directory of this source tree.
@@ -833,8 +832,7 @@ def main():
     st.markdown("---")
     st.markdown(
         """<div style='text-align: center; color: gray; font-size: 0.8em;'>
-        Created by <a href='https://github.com/your-username' target='_blank'>[Your Name]</a> | 
-        <a href='https://github.com/your-username/your-repo' target='_blank'>Original Repository</a> | 
+        Created by <a href='https://github.com/Ishaan-Rai09' target='_blank'>Ishaan Rai</a> | 
         © 2024
         </div>""", 
         unsafe_allow_html=True

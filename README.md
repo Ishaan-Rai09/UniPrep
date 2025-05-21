@@ -1,6 +1,6 @@
 # PDF to University MCQ Generator
 
-> Created by [Your Full Name](https://github.com/your-username) - Original repository: [github.com/your-username/your-repo](https://github.com/your-username/your-repo)
+> Created by [Ishaan Rai](https://github.com/Ishaan-Rai09)
 
 A Streamlit app that generates university-level multiple-choice questions (MCQs) from PDF documents using the Groq API.
 

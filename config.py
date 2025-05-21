@@ -1,7 +1,6 @@
 """
 PDF to University MCQ Generator - Configuration File
-Copyright (c) 2024 [Your Full Name]
-https://github.com/[your-username]/[your-repo]
+Copyright (c) 2024 Ishaan Rai
 
 All rights reserved.
 """
