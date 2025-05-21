@@ -66,7 +66,12 @@ try:
         POPPLER_INSTALLED = False
         logger.error(f"Poppler not installed or not properly configured. Error: {str(e)}")
         ocr_messages.append(f"⚠️ Poppler not installed or not properly configured. Error: {str(e)}")
-        ocr_messages.append("👉 For Windows, download from [Poppler for Windows](https://github.com/oschwartz10612/poppler-windows/releases/). Extract the ZIP and add the bin folder to your PATH.")
+        # Check if this is likely a cloud deployment
+        import platform
+        if platform.system() == "Linux" and os.path.exists("/home/streamlit"):
+            ocr_messages.append("🔄 Cloud deployment detected. If this is Streamlit Cloud, make sure you have a packages.txt file with 'poppler-utils' in it.")
+        else:
+            ocr_messages.append("👉 For Windows, download from [Poppler for Windows](https://github.com/oschwartz10612/poppler-windows/releases/). Extract the ZIP and add the bin folder to your PATH.")
     
     import pytesseract
     try:
@@ -81,7 +86,12 @@ try:
         TESSERACT_INSTALLED = False
         logger.error(f"Tesseract not installed or not properly configured. Error: {str(e)}")
         ocr_messages.append(f"⚠️ Tesseract not installed or not properly configured. Error: {str(e)}")
-        ocr_messages.append("👉 Download from [Tesseract for Windows](https://github.com/UB-Mannheim/tesseract/wiki). During installation, check 'Add to PATH' option.")
+        # Check if this is likely a cloud deployment
+        import platform
+        if platform.system() == "Linux" and os.path.exists("/home/streamlit"):
+            ocr_messages.append("🔄 Cloud deployment detected. If this is Streamlit Cloud, make sure you have a packages.txt file with 'tesseract-ocr' in it.")
+        else:
+            ocr_messages.append("👉 Download from [Tesseract for Windows](https://github.com/UB-Mannheim/tesseract/wiki). During installation, check 'Add to PATH' option.")
 except ImportError as e:
     OCR_AVAILABLE = False
     logger.error(f"OCR libraries not installed. Error: {str(e)}")
@@ -339,6 +349,14 @@ def extract_text_from_pdf(pdf_files: List[tempfile._TemporaryFileWrapper]) -> Di
             text = ""
             ocr_details = {}
             
+            # Check for cloud deployment
+            is_cloud_deployment = False
+            try:
+                import platform
+                is_cloud_deployment = platform.system() == "Linux" and os.path.exists("/home/streamlit")
+            except:
+                pass
+                
             # Method 1: OCR first using both Poppler and Tesseract (if available)
             if OCR_AVAILABLE and POPPLER_INSTALLED and TESSERACT_INSTALLED:
                 st.info(f"🔎 Trying parallel OCR extraction for {pdf_file.name} using both Poppler and Tesseract...")
@@ -360,7 +378,10 @@ def extract_text_from_pdf(pdf_files: List[tempfile._TemporaryFileWrapper]) -> Di
                 else:
                     st.warning(f"⚠️ OCR extraction didn't yield sufficient text. Trying regular methods...")
             else:
-                st.warning("⚠️ OCR extraction was skipped because Poppler or Tesseract is not properly installed.")
+                if is_cloud_deployment:
+                    st.warning("⚠️ OCR extraction is not available in this cloud deployment. Using fallback methods.")
+                else:
+                    st.warning("⚠️ OCR extraction was skipped because Poppler or Tesseract is not properly installed.")
                 
             # Method 2: PyPDF2 if OCR didn't yield enough text
             if len(text.strip()) < 100:
@@ -391,7 +412,11 @@ def extract_text_from_pdf(pdf_files: List[tempfile._TemporaryFileWrapper]) -> Di
             
             # Check if we got any meaningful text
             if len(text.strip()) < 50:
-                st.error(f"Could not extract meaningful text from {pdf_file.name} using methods: {', '.join(methods_tried)}. The PDF might be scanned, secured, or contain non-textual content.")
+                if is_cloud_deployment:
+                    st.error(f"Could not extract meaningful text from {pdf_file.name}. Cloud deployment may need additional configuration for OCR capabilities.")
+                    st.info("For scanned documents, consider adding `packages.txt` with OCR dependencies to your repository.")
+                else:
+                    st.error(f"Could not extract meaningful text from {pdf_file.name} using methods: {', '.join(methods_tried)}. The PDF might be scanned, secured, or contain non-textual content.")
                 logger.error(f"Failed to extract text from {pdf_file.name} using methods: {', '.join(methods_tried)}")
                 continue
                 
@@ -631,26 +656,51 @@ def main():
             ⚠️ **Enhanced PDF extraction is not available.** Some PDFs (especially scanned documents) may not be processed correctly.
             """)
             
-            st.markdown("### Installation Instructions for Windows")
-            
-            st.markdown("**Step 1: Install Poppler**")
-            st.markdown("""
-            1. Download Poppler from [Poppler for Windows](https://github.com/oschwartz10612/poppler-windows/releases/)
-            2. Extract the ZIP file to a folder (e.g., `C:\\Program Files\\poppler`)
-            3. Add the `bin` folder to your PATH environment variable:
-               - Right-click on 'This PC' > Properties > Advanced system settings > Environment Variables
-               - Edit the PATH variable and add the path to the bin folder (e.g., `C:\\Program Files\\poppler\\bin`)
-            4. Restart your computer to ensure PATH changes take effect
-            """)
-            
-            st.markdown("**Step 2: Install Tesseract OCR**")
-            st.markdown("""
-            1. Download Tesseract installer from [Tesseract for Windows](https://github.com/UB-Mannheim/tesseract/wiki)
-            2. Run the installer and select "Add to PATH" during installation
-            3. Complete the installation with default options
-            """)
-            
-            st.markdown("**Step 3: Restart the Application**")
+            # Check if this is likely a cloud deployment
+            import platform
+            if platform.system() == "Linux" and os.path.exists("/home/streamlit"):
+                st.markdown("### Cloud Deployment Instructions")
+                st.info("""
+                It appears you're running this app on Streamlit Cloud or another cloud platform.
+                
+                To enable OCR functionality on Streamlit Cloud, you need to:
+                
+                1. Add a `packages.txt` file to your repository with these dependencies:
+                ```
+                poppler-utils
+                tesseract-ocr
+                libtesseract-dev
+                ```
+                
+                2. Make sure your `requirements.txt` includes:
+                ```
+                pdf2image
+                pytesseract
+                ```
+                
+                3. Redeploying your app should install the necessary dependencies.
+                """)
+            else:
+                st.markdown("### Installation Instructions for Windows")
+                
+                st.markdown("**Step 1: Install Poppler**")
+                st.markdown("""
+                1. Download Poppler from [Poppler for Windows](https://github.com/oschwartz10612/poppler-windows/releases/)
+                2. Extract the ZIP file to a folder (e.g., `C:\\Program Files\\poppler`)
+                3. Add the `bin` folder to your PATH environment variable:
+                   - Right-click on 'This PC' > Properties > Advanced system settings > Environment Variables
+                   - Edit the PATH variable and add the path to the bin folder (e.g., `C:\\Program Files\\poppler\\bin`)
+                4. Restart your computer to ensure PATH changes take effect
+                """)
+                
+                st.markdown("**Step 2: Install Tesseract OCR**")
+                st.markdown("""
+                1. Download Tesseract installer from [Tesseract for Windows](https://github.com/UB-Mannheim/tesseract/wiki)
+                2. Run the installer and select "Add to PATH" during installation
+                3. Complete the installation with default options
+                """)
+                
+                st.markdown("**Step 3: Restart the Application**")
             
             # Show specific error messages
             for msg in ocr_messages:

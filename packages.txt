@@ -1,0 +1,9 @@
+poppler-utils
+tesseract-ocr
+libtesseract-dev
+libleptonica-dev
+pkg-config
+libpng-dev
+libjpeg-dev
+libtiff-dev
+zlib1g-dev 

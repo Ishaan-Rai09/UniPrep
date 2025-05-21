@@ -1,61 +1,80 @@
 # PDF to University MCQ Generator
 
-A Streamlit web application that lets you upload PDF files and generates university-level multiple choice questions (MCQs) using Groq's AI.
+A Streamlit app that generates university-level multiple-choice questions (MCQs) from PDF documents using the Groq API.
 
 ## Features
 
-- Upload multiple PDF files
-- Extract text content from PDFs
-- Generate university-level MCQs using Groq AI
-- Customize number of questions and difficulty level
-- Download generated MCQs as text files
+- Upload PDF files and extract text content
+- Generate university-level MCQs based on the content
+- Support for multiple PDF files
+- Enhanced PDF extraction with OCR capabilities
+- Customizable number of questions and difficulty levels
+- Choose between different Groq AI models
 
-## Installation
+## Local Installation
 
-1. Clone this repository:
-```
-git clone https://github.com/yourusername/pdf-mcq-generator.git
-cd pdf-mcq-generator
-```
+1. Clone this repository
+2. Install Python dependencies:
+   ```
+   pip install -r requirements.txt
+   ```
+3. For OCR capabilities, install system dependencies:
+   - **Windows**:
+     - Install [Poppler for Windows](https://github.com/oschwartz10612/poppler-windows/releases/)
+     - Install [Tesseract OCR](https://github.com/UB-Mannheim/tesseract/wiki)
+     - Add both to your PATH
+   - **Linux**:
+     ```
+     sudo apt-get update
+     sudo apt-get install -y poppler-utils tesseract-ocr libtesseract-dev
+     ```
+   - **macOS**:
+     ```
+     brew install poppler tesseract
+     ```
 
-2. Install dependencies:
-```
-pip install -r requirements.txt
-```
+4. Run the app:
+   ```
+   streamlit run app.py
+   ```
 
-3. Set up your Groq API key:
-   - The app comes configured with a default API key in `config.py`
-   - To use your own key, set it as an environment variable:
-     ```
-     export GROQ_API_KEY=your_groq_api_key
-     ```
-   - On Windows:
-     ```
-     set GROQ_API_KEY=your_groq_api_key
-     ```
-   - Or use Streamlit secrets management
+## Streamlit Cloud Deployment
+
+To deploy this app on Streamlit Cloud with full OCR capabilities:
+
+1. Make sure your repository includes:
+   - `app.py`
+   - `requirements.txt` (with all Python dependencies)
+   - `packages.txt` (with all system dependencies)
+   - `setup.sh` (optional verification script)
+
+2. The `packages.txt` file should contain:
+   ```
+   poppler-utils
+   tesseract-ocr
+   libtesseract-dev
+   libleptonica-dev
+   pkg-config
+   libpng-dev
+   libjpeg-dev
+   libtiff-dev
+   zlib1g-dev
+   ```
+
+3. Deploy to Streamlit Cloud by connecting your GitHub repository.
 
 ## Usage
 
-1. Run the application:
-```
-streamlit run app.py
-```
+1. Enter your Groq API key and validate it
+2. Upload one or more PDF files
+3. Set the number of questions and difficulty level
+4. Click "Generate MCQs"
+5. View and download the generated questions
 
-2. Open your browser and navigate to the URL shown in the terminal (typically http://localhost:8501)
+## API Key
 
-3. Upload PDF files containing academic content
+This app requires a Groq API key to function. Get your key from [Groq Console](https://console.groq.com/keys).
 
-4. Configure the number of questions and difficulty level using the sidebar
+## License
 
-5. Click "Generate MCQs" to process the files and create questions
-
-6. Download the generated MCQs using the download button
-
-## Requirements
-
-- Python 3.7+
-- Streamlit
-- PyPDF2
-- python-dotenv
-- Groq API key 
+[MIT License](LICENSE) 
