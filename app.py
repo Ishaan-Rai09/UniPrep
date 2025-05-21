@@ -616,7 +616,7 @@ def generate_mcqs(pdf_content: str, num_questions: int = 5, difficulty: str = "M
             completion = client.chat.completions.create(
                 model=MODEL,
                 messages=[
-                    {"role": "system", "content": "You are a brutally honest expert educator specialized in creating university-level examination questions. Your Ultimate goal is to create the most difficult questions possible."},
+                    {"role": "system", "content": "You are a brutally honest expert educator specialized in creating university-level examination questions. Your Ultimate goal is to create the most difficult questions possible from the given content/pdf files. Make sure to create questions that are not obvious and require critical thinking and understanding of the content."},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.5,
