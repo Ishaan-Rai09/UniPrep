@@ -29,6 +29,12 @@ import io
 import re
 import time
 import logging
+import signal
+from functools import lru_cache
+import hashlib
+import concurrent.futures
+import threading
+from tqdm import tqdm
 
 # For OpenAI API integration
 try:
@@ -554,8 +560,116 @@ def chunk_text(text, max_chunk_size=3000):
 
     return chunks
 
+def enhance_extracted_text(text):
+    """Apply advanced text preprocessing to improve quality of extracted text."""
+    if not text or len(text.strip()) < 100:
+        return text
+        
+    # Remove repeated line breaks
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    
+    # Remove strange character sequences
+    text = re.sub(r'[^\w\s\.,;:\(\)\[\]\{\}\-\'\"\?\!@#$%&*+=/<>]', '', text)
+    
+    # Fix common OCR errors
+    text = re.sub(r'l\b', 'i', text)  # Replace standalone 'l' with 'i'
+    text = re.sub(r'0', 'o', text)    # Replace '0' with 'o' in certain contexts
+    
+    # Normalize whitespace
+    text = re.sub(r'\s+', ' ', text)
+    
+    # Improve paragraph breaks
+    text = re.sub(r'(\. |\? |\! )([A-Z])', r'\1\n\2', text)
+    
+    return text.strip()
+
+def determine_optimal_extraction_strategy(pdf_file):
+    """Automatically determine the best extraction strategy based on PDF properties."""
+    try:
+        # Check file size
+        pdf_file.seek(0, os.SEEK_END)
+        file_size = pdf_file.tell()
+        pdf_file.seek(0)
+        
+        # Get page count
+        try:
+            with pdfplumber.open(pdf_file) as pdf:
+                page_count = len(pdf.pages)
+                
+            pdf_file.seek(0)
+            
+            logger.info(f"PDF has {page_count} pages and size {file_size/1024/1024:.2f} MB")
+            
+            # Sample the first page to check if it's scannable
+            is_scanned = False
+            with pdfplumber.open(pdf_file) as pdf:
+                if page_count > 0:
+                    first_page = pdf.pages[0]
+                    # Check if page has text
+                    text = first_page.extract_text()
+                    if not text or len(text.strip()) < 50:
+                        is_scanned = True
+            
+            pdf_file.seek(0)
+            
+            # Define our strategy based on findings
+            strategy = {
+                "is_large_file": file_size > 10 * 1024 * 1024,  # 10MB
+                "is_long_document": page_count > 50,
+                "is_very_long": page_count > 100,
+                "is_scanned": is_scanned,
+                "batch_size": 10,  # Default batch size
+                "requires_ocr": is_scanned,
+                "extraction_priority": "quality"  # "speed" or "quality" 
+            }
+            
+            # Adjust batch size based on page count
+            if page_count <= 20:
+                strategy["batch_size"] = page_count  # Process all at once for small documents
+            elif page_count <= 50:
+                strategy["batch_size"] = 20
+            elif page_count <= 100:
+                strategy["batch_size"] = 15
+            else:
+                strategy["batch_size"] = 10  # Very conservative for huge docs
+            
+            # If it's a scanned document, prioritize OCR with smaller batches
+            if is_scanned:
+                strategy["batch_size"] = min(strategy["batch_size"], 10)
+                strategy["requires_ocr"] = True
+                strategy["extraction_priority"] = "quality"
+                
+            logger.info(f"Determined optimal strategy: {strategy}")
+            return strategy
+            
+        except Exception as e:
+            logger.error(f"Error determining page count: {str(e)}")
+            # Default conservative strategy
+            return {
+                "is_large_file": file_size > 5 * 1024 * 1024,
+                "is_long_document": True,
+                "is_very_long": file_size > 20 * 1024 * 1024,
+                "is_scanned": True,
+                "batch_size": 10,
+                "requires_ocr": True,
+                "extraction_priority": "quality"
+            }
+            
+    except Exception as e:
+        logger.error(f"Error determining extraction strategy: {str(e)}")
+        # Most conservative default
+        return {
+            "is_large_file": True,
+            "is_long_document": True,
+            "is_very_long": True,
+            "is_scanned": True,
+            "batch_size": 5,
+            "requires_ocr": True,
+            "extraction_priority": "quality"
+        }
+
 def generate_mcqs(pdf_content: str, num_questions: int = 5, difficulty: str = "Medium") -> str:
-    """Generate MCQs using the selected LLM provider API."""
+    """Generate MCQs using the selected LLM provider API with enhanced quality."""
     global CHUNK_SIZE
     
     # Get the active provider from session state
@@ -575,6 +689,9 @@ def generate_mcqs(pdf_content: str, num_questions: int = 5, difficulty: str = "M
     if active_provider in ["groq", "openai"] and client is None:
         return "Error: API client is not initialized. Please validate your API key first."
     
+    # Clean and preprocess the content for improved question generation
+    pdf_content = enhance_extracted_text(pdf_content)
+    
     # Chunk the content if too large
     if len(pdf_content) > CHUNK_SIZE:
         chunks = chunk_text(pdf_content, max_chunk_size=CHUNK_SIZE)
@@ -586,14 +703,22 @@ def generate_mcqs(pdf_content: str, num_questions: int = 5, difficulty: str = "M
         if len(chunks) > 1:
             pdf_content += "\n\nAdditional important content: " + chunks[1][:500]
     
+    # Enhanced prompt for better question quality
     prompt = f"""
-    Based on the following academic content, generate {num_questions} university-level multiple-choice questions (MCQs) at {difficulty} difficulty.
+    Based on the following academic content, generate {num_questions} high-quality university-level multiple-choice questions (MCQs) at {difficulty} difficulty.
+    
+    KEY REQUIREMENTS:
+    1. Questions must test deep understanding, not just recall
+    2. Include questions that require analysis and critical thinking
+    3. Cover the most important concepts in the content
+    4. Create challenging but fair distractors (wrong answers)
+    5. Include complex application-based questions that apply concepts to new scenarios
     
     For each question:
-    1. Write a clear question based on important concepts
+    1. Write a clear, precise question
     2. Provide 4 options (A, B, C, D)
     3. Indicate the correct answer
-    4. Give a brief explanation for why the answer is correct
+    4. Provide a detailed explanation for why the answer is correct and why others are incorrect
     
     Content:
     {pdf_content}
@@ -607,38 +732,38 @@ def generate_mcqs(pdf_content: str, num_questions: int = 5, difficulty: str = "M
     D. [Option D]
     
     Answer: [Correct option]
-    Explanation: [Brief explanation]
+    Explanation: [Detailed explanation]
     """
     
     try:
         if active_provider == "groq":
-            # Use Groq client
+            # Use Groq client with enhanced system prompt
             completion = client.chat.completions.create(
                 model=MODEL,
                 messages=[
-                    {"role": "system", "content": "You are a brutally honest expert educator specialized in creating university-level examination questions. Your Ultimate goal is to create the most difficult questions possible from the given content/pdf files. Make sure to create questions that are not obvious and require critical thinking and understanding of the content."},
+                    {"role": "system", "content": "You are a brutally honest expert educator specialized in creating university-level examination questions. Your Ultimate goal is to create the most difficult questions possible from the given content/pdf files. Make sure to create questions that are not obvious and require critical thinking and understanding of the content. Focus on creating questions that test application, analysis, and evaluation rather than simple recall. Include questions that combine multiple concepts."},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.5,
-                max_tokens=2000,
+                temperature=0.7,  # Slightly increased for more creative questions
+                max_tokens=3000,  # Increased for more detailed explanations
             )
             return completion.choices[0].message.content
             
         elif active_provider == "openai":
-            # Use OpenAI client
+            # Use OpenAI client with enhanced system prompt
             completion = client.chat.completions.create(
                 model="gpt-4",  # Using GPT-4 by default
                 messages=[
-                    {"role": "system", "content": "You are a brutally honest expert educator specialized in creating university-level examination questions. Your Ultimate goal is to create the most difficult questions possible."},
+                    {"role": "system", "content": "You are a brutally honest expert educator specialized in creating university-level examination questions. Your Ultimate goal is to create the most difficult questions possible from the given content/pdf files. Make sure to create questions that are not obvious and require critical thinking and understanding of the content. Focus on creating questions that test application, analysis, and evaluation rather than simple recall. Include questions that combine multiple concepts."},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.5,
-                max_tokens=2000,
+                temperature=0.7,
+                max_tokens=3000,
             )
             return completion.choices[0].message.content
             
         elif active_provider == "ollama":
-            # Use requests to call Ollama API
+            # Use requests to call Ollama API with enhanced system prompt
             if not OLLAMA_AVAILABLE:
                 return "Error: Requests package is not installed. Please install it with `pip install requests`"
                 
@@ -646,21 +771,21 @@ def generate_mcqs(pdf_content: str, num_questions: int = 5, difficulty: str = "M
                 # Get the host URL from session state
                 host_url = st.session_state.ollama_host
                 
-                # Prepare the request payload
+                # Prepare the request payload with enhanced system prompt
                 payload = {
                     "model": "llama3",  # Default model, can be made configurable
                     "messages": [
-                        {"role": "system", "content": "You are a brutally honest expert educator specialized in creating university-level examination questions. Your Ultimate goal is to create the most difficult questions possible."},
+                        {"role": "system", "content": "You are a brutally honest expert educator specialized in creating university-level examination questions. Your Ultimate goal is to create the most difficult questions possible from the given content/pdf files. Make sure to create questions that are not obvious and require critical thinking and understanding of the content. Focus on creating questions that test application, analysis, and evaluation rather than simple recall. Include questions that combine multiple concepts."},
                         {"role": "user", "content": prompt}
                     ],
                     "stream": False,
                     "options": {
-                        "temperature": 0.5,
+                        "temperature": 0.7,
                     }
                 }
                 
                 # Make the API call
-                response = requests.post(f"{host_url}/api/chat", json=payload, timeout=120)
+                response = requests.post(f"{host_url}/api/chat", json=payload, timeout=180)  # Increased timeout
                 
                 # Check if response is successful
                 if response.status_code == 200:
@@ -681,6 +806,272 @@ def generate_mcqs(pdf_content: str, num_questions: int = 5, difficulty: str = "M
         error_msg = str(e)
         st.error(f"API Error: {error_msg}")
         return f"Error generating MCQs: {error_msg}"
+
+def extract_text_with_ocr_page_range(pdf_file, start_page=1, end_page=None, timeout_seconds=300) -> str:
+    """Extract text using OCR with Poppler and Tesseract for a specific page range with timeout."""
+    if not POPPLER_INSTALLED:
+        logger.warning("Poppler OCR extraction skipped - Poppler not installed")
+        return ""
+    
+    start_time = time.time()
+    logger.info(f"Starting OCR extraction with page range ({start_page}-{end_page}) for {pdf_file.name}")
+    try:
+        # Save a copy of the PDF content
+        pdf_content = pdf_file.read()
+        pdf_file.seek(0)  # Reset file pointer
+        
+        # Generate a hash of the PDF content for caching
+        pdf_hash = hashlib.md5(pdf_content).hexdigest()
+        
+        # Use the cached_ocr_process function with the hash and page range
+        return cached_ocr_process(pdf_hash, pdf_content, start_page, end_page, timeout_seconds)
+        
+    except Exception as e:
+        logger.error(f"Page range OCR extraction issue: {str(e)}")
+        return ""
+
+@lru_cache(maxsize=10)  # Cache the 10 most recent PDFs
+def cached_ocr_process(pdf_hash, pdf_content, start_page=1, end_page=None, timeout_seconds=300):
+    """Process OCR with caching based on PDF hash and page range, using parallel processing."""
+    logger.info(f"Processing pages {start_page}-{end_page} with hash {pdf_hash[:8]}...")
+    
+    try:
+        # Create a cross-platform timeout mechanism using threading.Timer
+        timeout_occurred = [False]  # Using a list to allow modification inside nested functions
+        
+        def timeout_handler():
+            timeout_occurred[0] = True
+            logger.error(f"OCR processing timed out after {timeout_seconds} seconds")
+        
+        # Set up the timeout timer
+        timer = threading.Timer(timeout_seconds, timeout_handler)
+        timer.daemon = True  # Allow the timer to be killed when the program exits
+        timer.start()
+        
+        try:
+            # Convert PDF to images using Poppler with page range
+            logger.info(f"Converting PDF pages {start_page}-{end_page} to images with Poppler")
+            images = convert_from_bytes(pdf_content, first_page=start_page, last_page=end_page)
+            logger.info(f"Successfully converted {len(images)} pages using Poppler")
+            
+            # Check if timeout occurred during conversion
+            if timeout_occurred[0]:
+                return f"[Timeout occurred while converting pages {start_page}-{end_page}. Try processing fewer pages at once.]"
+                
+            # Use ThreadPoolExecutor for parallel processing
+            text_parts = []
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(images), 4)) as executor:
+                # Create futures for all pages
+                futures = []
+                for i, img in enumerate(images):
+                    page_num = start_page + i
+                    future = executor.submit(process_page_with_ocr, img, page_num)
+                    futures.append(future)
+                
+                # Process the results as they complete
+                for i, future in enumerate(concurrent.futures.as_completed(futures)):
+                    # Check if timeout occurred
+                    if timeout_occurred[0]:
+                        break
+                        
+                    page_num = start_page + i
+                    try:
+                        page_text = future.result()
+                        text_parts.append(page_text)
+                        logger.info(f"Completed OCR for page {page_num} ({i+1}/{len(images)})")
+                    except Exception as e:
+                        logger.error(f"Error completing OCR for page {page_num}: {str(e)}")
+                        text_parts.append("")
+            
+            # Check again if timeout occurred
+            if timeout_occurred[0]:
+                return f"[Timeout occurred while processing pages {start_page}-{end_page}. Try processing fewer pages at once.]"
+            
+            # Combine all the text
+            text = "\n".join(text_parts)
+            return text
+        finally:
+            # Cancel the timer if it's still running
+            timer.cancel()
+            
+    except Exception as e:
+        logger.error(f"OCR processing error: {str(e)}")
+        return ""
+
+def process_page_with_ocr(img, page_num):
+    """Process a single page with OCR and return the text."""
+    try:
+        logger.info(f"Processing page {page_num} with Tesseract OCR")
+        page_text = pytesseract.image_to_string(img)
+        return page_text
+    except Exception as e:
+        logger.error(f"Error processing page {page_num}: {str(e)}")
+        return ""
+
+def process_large_pdf_in_batches(pdf_file, batch_size=20, timeout_seconds=300, progress_callback=None):
+    """Process a large PDF in batches and combine the results."""
+    try:
+        # Check if we have a valid PDF before processing
+        try:
+            # First get the total number of pages
+            with pdfplumber.open(pdf_file) as pdf:
+                total_pages = len(pdf.pages)
+            
+            logger.info(f"PDF has {total_pages} pages, processing in batches of {batch_size}")
+        except Exception as e:
+            logger.error(f"Error getting page count: {str(e)}")
+            return ""
+        
+        # Reset file pointer
+        pdf_file.seek(0)
+        
+        # Save a copy of the PDF content for repeated use
+        pdf_content = pdf_file.read()
+        
+        # Generate a hash for caching
+        pdf_hash = hashlib.md5(pdf_content).hexdigest()
+        
+        # Process in batches
+        all_text = []
+        
+        # Calculate number of batches
+        num_batches = (total_pages + batch_size - 1) // batch_size
+        
+        for batch in range(num_batches):
+            start = batch * batch_size + 1
+            end = min((batch + 1) * batch_size, total_pages)
+            
+            # Update progress callback if provided
+            if progress_callback:
+                progress_callback(f"Processing batch {batch+1}/{num_batches} (pages {start}-{end})")
+            
+            logger.info(f"Processing batch {batch+1}/{num_batches} (pages {start}-{end})")
+            
+            # Process this batch
+            batch_text = cached_ocr_process(
+                f"{pdf_hash}_batch_{batch}", 
+                pdf_content,
+                start_page=start,
+                end_page=end,
+                timeout_seconds=timeout_seconds
+            )
+            
+            all_text.append(batch_text)
+            
+            # Check if we've gotten a timeout message
+            if "[Timeout occurred" in batch_text:
+                logger.warning(f"Timeout in batch {batch+1}, stopping further processing")
+                break
+        
+        # Combine all batches
+        combined_text = "\n\n".join(all_text)
+        return combined_text
+    
+    except Exception as e:
+        logger.error(f"Error in batch processing: {str(e)}")
+        return ""
+
+# Add a function to check if a PDF is password-protected
+def is_pdf_password_protected(pdf_file):
+    """Check if a PDF is password protected or encrypted."""
+    try:
+        # Try to open with PyPDF2
+        pdf_file.seek(0)
+        reader = PyPDF2.PdfReader(pdf_file)
+        
+        # Check if it's encrypted
+        if reader.is_encrypted:
+            return True
+            
+        # Try to access the first page
+        if len(reader.pages) > 0:
+            try:
+                # Try to extract text from the first page
+                reader.pages[0].extract_text()
+                return False
+            except Exception:
+                # If we can't extract text, it may be encrypted
+                return True
+        
+        return False
+    except Exception as e:
+        logger.warning(f"Error checking PDF encryption: {str(e)}")
+        # If there's an error, assume it might be protected
+        return True
+
+# Add a function to try PDF extraction with multiple methods and parameters
+def extract_text_with_backup_methods(pdf_file):
+    """Try multiple extraction methods to get text from a problematic PDF."""
+    methods_tried = []
+    all_text = []
+    
+    logger.info(f"Trying backup methods for difficult PDF: {pdf_file.name}")
+    
+    # Method 1: Basic PyPDF2
+    pdf_file.seek(0)
+    methods_tried.append("PyPDF2 (basic)")
+    try:
+        reader = PyPDF2.PdfReader(pdf_file)
+        text = ""
+        for page in reader.pages:
+            text += page.extract_text() + "\n"
+        if len(text.strip()) > 100:
+            all_text.append(text)
+            logger.info(f"Basic PyPDF2 extraction got {len(text.split())} words")
+    except Exception as e:
+        logger.warning(f"Basic PyPDF2 failed: {str(e)}")
+    
+    # Method 2: PDFPlumber with different parameters
+    pdf_file.seek(0)
+    methods_tried.append("PDFPlumber (custom parameters)")
+    try:
+        with pdfplumber.open(pdf_file) as pdf:
+            text = ""
+            for page in pdf.pages:
+                # Extract with custom parameters
+                page_text = page.extract_text(x_tolerance=3, y_tolerance=3)
+                if not page_text:
+                    # Try again with different parameters
+                    page_text = page.extract_text(x_tolerance=5, y_tolerance=10)
+                text += page_text + "\n" if page_text else "\n"
+        if len(text.strip()) > 100:
+            all_text.append(text)
+            logger.info(f"Custom PDFPlumber extraction got {len(text.split())} words")
+    except Exception as e:
+        logger.warning(f"PDFPlumber with custom parameters failed: {str(e)}")
+    
+    # Method 3: Extract with direct bytes
+    pdf_file.seek(0)
+    methods_tried.append("Direct byte extraction")
+    try:
+        content = pdf_file.read()
+        # Try to decode as text
+        text = ""
+        for encoding in ['utf-8', 'latin-1', 'ascii']:
+            try:
+                if isinstance(content, bytes):
+                    decoded = content.decode(encoding, errors='ignore')
+                    # Keep only printable characters
+                    text = ''.join(c for c in decoded if c.isprintable() or c in ['\n', '\t', ' '])
+                    if len(text.strip()) > 100:
+                        break
+            except:
+                continue
+        if len(text.strip()) > 100:
+            all_text.append(text)
+            logger.info(f"Direct byte extraction got {len(text.split())} words")
+    except Exception as e:
+        logger.warning(f"Direct byte extraction failed: {str(e)}")
+    
+    # If we have any successful extractions, combine them
+    if all_text:
+        # Use the longest extraction result
+        best_text = max(all_text, key=lambda t: len(t.strip()))
+        logger.info(f"Selected best extraction with {len(best_text.split())} words")
+        return best_text
+    else:
+        logger.error(f"All backup extraction methods failed for {pdf_file.name}")
+        return ""
 
 def main():
     st.title("📚 PDF to University MCQ Generator")
@@ -1124,11 +1515,119 @@ def main():
     if uploaded_files:
         st.info(f"📁 {len(uploaded_files)} file(s) uploaded")
         
+        with st.expander("PDF Processing Settings", expanded=False):
+            st.info("The app will automatically determine the optimal processing strategy based on your PDF.")
+            
+            show_advanced = st.checkbox("Show advanced settings", value=False)
+            
+            if show_advanced:
+                timeout_seconds = st.slider("Processing timeout per batch (seconds)", 
+                                          min_value=60, max_value=900, value=300, 
+                                          help="Maximum time to spend processing a single batch of pages")
+                
+                extraction_priority = st.radio(
+                    "Extraction priority",
+                    ["Auto (recommended)", "Speed", "Quality"],
+                    index=0,
+                    help="Auto will balance speed and quality based on PDF type"
+                )
+            else:
+                timeout_seconds = 300  # Default
+                extraction_priority = "Auto (recommended)"
+        
         # Process button
         if st.button("Generate MCQs", type="primary"):
             with st.spinner("Processing PDFs and generating MCQs..."):
-                # Extract text from PDFs
-                pdf_contents = extract_text_from_pdf(uploaded_files)
+                # Extract text from PDFs with automatic strategy
+                pdf_contents = {}
+                
+                for pdf_file in uploaded_files:
+                    try:
+                        # Create a progress placeholder
+                        progress_text = st.empty()
+                        progress_text.info(f"🔎 Analyzing {pdf_file.name}...")
+                        
+                        # Create a progress bar
+                        progress_bar = st.progress(0)
+                        
+                        # First, check if the PDF is password-protected
+                        pdf_file.seek(0)
+                        if is_pdf_password_protected(pdf_file):
+                            progress_text.error(f"❌ The PDF file '{pdf_file.name}' appears to be password-protected or encrypted. Please upload an unprotected PDF.")
+                            continue
+                        
+                        # Determine the optimal extraction strategy for this PDF
+                        pdf_file.seek(0)
+                        strategy = determine_optimal_extraction_strategy(pdf_file)
+                        
+                        # Override extraction priority if user selected it
+                        if extraction_priority != "Auto (recommended)":
+                            strategy["extraction_priority"] = extraction_priority.lower()
+                        
+                        progress_text.info(f"📊 PDF analysis complete: {pdf_file.name} has approximately {strategy.get('is_long_document', False) and 'many' or 'few'} pages")
+                        if strategy.get("is_scanned", False):
+                            progress_text.info("📷 This appears to be a scanned document - will use OCR processing")
+                        
+                        # Update progress
+                        progress_bar.progress(10)
+                        
+                        # First try text extraction for non-scanned documents
+                        text = ""
+                        if not strategy.get("is_scanned", False):
+                            progress_text.info(f"📄 Trying text extraction first...")
+                            pdf_file.seek(0)
+                            text = extract_text_with_pypdf2(pdf_file)
+                            
+                            if len(text.strip()) < 100:
+                                pdf_file.seek(0)
+                                backup_text = extract_text_with_backup_methods(pdf_file)
+                                if len(backup_text.strip()) > len(text.strip()):
+                                    text = backup_text
+                            
+                            progress_text.info(f"📄 Text extraction got {len(text.split())} words")
+                            progress_bar.progress(25)
+                        
+                        # If text extraction didn't work well or it's a scanned document, use OCR
+                        if len(text.strip()) < 200 or strategy.get("requires_ocr", False):
+                            progress_text.info(f"📷 Using OCR processing with batch size {strategy.get('batch_size', 10)}...")
+                            
+                            # Define a callback to update the progress
+                            def update_progress(message):
+                                progress_text.info(message)
+                            
+                            pdf_file.seek(0)
+                            ocr_text = process_large_pdf_in_batches(
+                                pdf_file,
+                                batch_size=strategy.get("batch_size", 10),
+                                timeout_seconds=timeout_seconds,
+                                progress_callback=update_progress
+                            )
+                            
+                            # Only use OCR text if it's better than what we got previously
+                            if len(ocr_text.strip()) > len(text.strip()):
+                                text = ocr_text
+                                
+                            progress_bar.progress(75)
+                        
+                        # Apply text enhancements
+                        progress_text.info("✨ Applying text enhancements to improve quality...")
+                        text = enhance_extracted_text(text)
+                        progress_bar.progress(90)
+                        
+                        # Check if we got any meaningful text
+                        if len(text.strip()) < 50:
+                            progress_text.warning(f"⚠️ Could not extract sufficient text from {pdf_file.name}.")
+                            continue
+                        
+                        # Add the extracted text to our dictionary
+                        pdf_contents[pdf_file.name] = text
+                        words = len(text.split())
+                        progress_text.success(f"✅ Successfully extracted {words} words from {pdf_file.name}")
+                        progress_bar.progress(100)
+                        
+                    except Exception as e:
+                        st.error(f"Error processing {pdf_file.name}: {str(e)}")
+                        logger.error(f"Error processing {pdf_file.name}: {str(e)}", exc_info=True)
                 
                 # Display results in tabs
                 if pdf_contents:
