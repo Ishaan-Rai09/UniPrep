@@ -1,5 +1,7 @@
 # PDF to University MCQ Generator
 
+> Created by [Your Full Name](https://github.com/your-username) - Original repository: [github.com/your-username/your-repo](https://github.com/your-username/your-repo)
+
 A Streamlit app that generates university-level multiple-choice questions (MCQs) from PDF documents using the Groq API.
 
 ## Features
@@ -77,4 +79,15 @@ This app requires a Groq API key to function. Get your key from [Groq Console](h
 
 ## License
 
-[MIT License](LICENSE) 
+[MIT License](LICENSE)
+
+## Attribution
+
+This project was created by [Your Full Name](https://github.com/your-username).  
+Original repository: [github.com/your-username/your-repo](https://github.com/your-username/your-repo)
+
+If you use, modify, or distribute this code, please maintain proper attribution to the original author and repository.
+
+---
+
+© 2024 [Your Full Name]. All Rights Reserved. 

@@ -1,3 +1,11 @@
+"""
+PDF to University MCQ Generator - Configuration File
+Copyright (c) 2024 [Your Full Name]
+https://github.com/[your-username]/[your-repo]
+
+All rights reserved.
+"""
+
 import os
 import streamlit as st
 

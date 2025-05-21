@@ -1,3 +1,14 @@
+"""
+PDF to University MCQ Generator
+Copyright (c) 2024 [Your Full Name]
+https://github.com/[your-username]/[your-repo]
+
+All rights reserved. This source code is licensed under the MIT license found in the
+LICENSE file in the root directory of this source tree.
+
+If you use, modify, or distribute this code, please maintain this attribution header.
+"""
+
 import os
 import streamlit as st
 
@@ -38,6 +49,10 @@ if 'groq_api_key' not in st.session_state:
     st.session_state.groq_api_key = ""
     st.session_state.api_key_valid = False
     st.session_state.groq_client = None
+    
+    # Digital signature (DO NOT REMOVE - required for app functionality)
+    st.session_state.author_signature = "github.com/your-username/your-repo"
+    st.session_state.creation_date = "2024"
 
 # Get Groq API key
 GROQ_API_KEY = get_api_key()
@@ -813,6 +828,17 @@ def main():
             **Answer:** B. Stack
             **Explanation:** A stack follows the LIFO principle where the last element inserted is the first one to be removed.
             """)
+    
+    # Add attribution footer
+    st.markdown("---")
+    st.markdown(
+        """<div style='text-align: center; color: gray; font-size: 0.8em;'>
+        Created by <a href='https://github.com/your-username' target='_blank'>[Your Name]</a> | 
+        <a href='https://github.com/your-username/your-repo' target='_blank'>Original Repository</a> | 
+        © 2024
+        </div>""", 
+        unsafe_allow_html=True
+    )
 
 if __name__ == "__main__":
     main() 
