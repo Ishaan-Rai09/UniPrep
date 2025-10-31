@@ -51,6 +51,15 @@ try:
 except ImportError:
     OLLAMA_AVAILABLE = False
 
+# For MongoDB integration
+try:
+    from pymongo import MongoClient
+    from datetime import datetime
+    MONGODB_AVAILABLE = True
+except ImportError:
+    MONGODB_AVAILABLE = False
+    logger.warning("PyMongo not installed. MongoDB features will be unavailable.")
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -84,6 +93,15 @@ if 'active_provider' not in st.session_state:
 
 if 'api_key_valid' not in st.session_state:
     st.session_state.api_key_valid = False  # Legacy for backward compatibility
+
+# MongoDB session state
+if 'mongodb_uri' not in st.session_state:
+    # Load from environment variable
+    st.session_state.mongodb_uri = os.getenv('MONGODB_URI', 'mongodb://localhost:27017/')
+    st.session_state.mongodb_connected = False
+    st.session_state.mongodb_client = None
+    st.session_state.user_id = None  # Simple user identification
+    st.session_state.mongodb_auto_connect_tried = False
     
 # For attribution
 st.session_state.author_signature = "github.com/your-username/your-repo"
@@ -93,7 +111,7 @@ st.session_state.creation_date = "2024"
 GROQ_API_KEY = get_api_key()
 
 # Selected model
-MODEL = "llama3-70b-8192"
+MODEL = "llama-3.3-70b-versatile"
 CHUNK_SIZE = 4000
 
 # OCR availability flags
@@ -159,7 +177,7 @@ def validate_api_key(api_key):
         
         # Make a minimal API call to test the key
         response = test_client.chat.completions.create(
-            model="llama3-8b-8192",  # Using smaller model for faster validation
+            model="llama-3.3-70b-versatile",  # Using available model for validation
             messages=[{"role": "user", "content": "Hello"}],
             max_tokens=10,
         )
@@ -195,6 +213,71 @@ def validate_openai_api_key(api_key):
     except Exception as e:
         logger.error(f"OpenAI API key validation failed: {str(e)}")
         return False
+
+def connect_to_mongodb(uri: str) -> bool:
+    """Connect to MongoDB and test the connection."""
+    if not MONGODB_AVAILABLE:
+        st.warning("PyMongo is not installed. Install it with: pip install pymongo")
+        return False
+    
+    try:
+        client = MongoClient(uri, serverSelectionTimeoutMS=5000)
+        # Test connection
+        client.admin.command('ping')
+        st.session_state.mongodb_client = client
+        st.session_state.mongodb_connected = True
+        logger.info("Successfully connected to MongoDB")
+        return True
+    except Exception as e:
+        logger.error(f"MongoDB connection failed: {str(e)}")
+        st.session_state.mongodb_connected = False
+        st.session_state.mongodb_client = None
+        return False
+
+def save_mcqs_to_mongodb(pdf_name: str, mcqs_text: str, num_questions: int, difficulty: str) -> bool:
+    """Save generated MCQs to MongoDB."""
+    if not st.session_state.mongodb_connected or st.session_state.mongodb_client is None:
+        return False
+    
+    try:
+        db = st.session_state.mongodb_client['uniprep_db']
+        collection = db['mcq_history']
+        
+        # Create document
+        document = {
+            "user_id": st.session_state.user_id or "anonymous",
+            "pdf_name": pdf_name,
+            "mcqs_text": mcqs_text,
+            "num_questions": num_questions,
+            "difficulty": difficulty,
+            "created_at": datetime.now(),
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        collection.insert_one(document)
+        logger.info(f"Saved MCQs for {pdf_name} to MongoDB")
+        return True
+    except Exception as e:
+        logger.error(f"Error saving to MongoDB: {str(e)}")
+        return False
+
+def load_mcqs_from_mongodb(limit: int = 10) -> List[Dict]:
+    """Load previous MCQs from MongoDB."""
+    if not st.session_state.mongodb_connected or st.session_state.mongodb_client is None:
+        return []
+    
+    try:
+        db = st.session_state.mongodb_client['uniprep_db']
+        collection = db['mcq_history']
+        
+        # Query for user's MCQs, sorted by most recent
+        query = {"user_id": st.session_state.user_id or "anonymous"}
+        mcqs = list(collection.find(query).sort("created_at", -1).limit(limit))
+        
+        return mcqs
+    except Exception as e:
+        logger.error(f"Error loading from MongoDB: {str(e)}")
+        return []
 
 def validate_ollama_host(host_url):
     """Validate the Ollama host by checking connectivity and available models."""
@@ -582,6 +665,258 @@ def enhance_extracted_text(text):
     text = re.sub(r'(\. |\? |\! )([A-Z])', r'\1\n\2', text)
     
     return text.strip()
+
+def format_mcqs_for_display(mcqs_text: str) -> None:
+    """Format and display MCQs with clean, simple styling."""
+    # Remove any intro text before the questions
+    mcqs_text = re.sub(r'^.*?(?=Question \d+:|$)', '', mcqs_text, flags=re.DOTALL)
+    
+    # Split MCQs by question pattern
+    questions = re.split(r'Question \d+:', mcqs_text)
+    questions = [q.strip() for q in questions if q.strip()]
+    
+    for idx, question_block in enumerate(questions, 1):
+        # Create a clean container for each question
+        st.markdown(f"### 📝 Question {idx}")
+        
+        # Split into question, options, answer, and explanation
+        lines = question_block.strip().split('\n')
+        
+        # Extract question text
+        question_text = ""
+        options = []
+        answer = ""
+        explanation = ""
+        
+        current_section = "question"
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+                
+            # Check for answer section
+            if line.startswith("Answer:"):
+                current_section = "answer"
+                answer = line.replace("Answer:", "").strip()
+                continue
+            
+            # Check for explanation section
+            if line.startswith("Explanation:"):
+                current_section = "explanation"
+                explanation = line.replace("Explanation:", "").strip()
+                continue
+            
+            # Check for options
+            if re.match(r'^[A-D]\.', line):
+                options.append(line)
+                continue
+            
+            # Add to current section
+            if current_section == "question":
+                question_text += line + " "
+            elif current_section == "explanation":
+                explanation += " " + line
+        
+        # Display question text
+        st.markdown(f"**{question_text.strip()}**")
+        st.markdown("")  # Empty line for spacing
+        
+        # Display options in a clean format
+        if options:
+            for option in options:
+                # Check if this is the correct answer
+                is_correct = answer and option.startswith(answer.strip()[0])
+                if is_correct:
+                    st.markdown(f":green[**✅ {option}**]")
+                else:
+                    st.markdown(f"{option}")
+        
+        st.markdown("")  # Empty line for spacing
+        
+        # Display answer clearly
+        if answer:
+            st.markdown(f"**Correct Answer:** :green[{answer}]")
+        
+        # Display explanation
+        if explanation:
+            st.markdown(f"**Explanation:** {explanation.strip()}")
+        
+        # Add a divider between questions
+        st.divider()
+
+def generate_pdf_from_mcqs(mcqs_text: str, pdf_name: str) -> bytes:
+    """Generate a professional PDF from MCQs text using reportlab."""
+    try:
+        from reportlab.lib.pagesizes import letter, A4
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import inch
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
+        from reportlab.lib.enums import TA_JUSTIFY, TA_LEFT, TA_CENTER
+        from reportlab.lib.colors import HexColor
+    except ImportError:
+        st.error("ReportLab is not installed. Installing it now...")
+        import subprocess
+        subprocess.check_call(["pip", "install", "reportlab"])
+        from reportlab.lib.pagesizes import letter, A4
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import inch
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
+        from reportlab.lib.enums import TA_JUSTIFY, TA_LEFT, TA_CENTER
+        from reportlab.lib.colors import HexColor
+    
+    # Create a buffer to hold the PDF
+    buffer = io.BytesIO()
+    
+    # Create the PDF document
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=72,
+        leftMargin=72,
+        topMargin=72,
+        bottomMargin=18,
+    )
+    
+    # Container for the 'Flowable' objects
+    elements = []
+    
+    # Define styles
+    styles = getSampleStyleSheet()
+    
+    # Custom styles
+    title_style = ParagraphStyle(
+        'CustomTitle',
+        parent=styles['Heading1'],
+        fontSize=24,
+        textColor=HexColor('#1f4788'),
+        spaceAfter=30,
+        alignment=TA_CENTER,
+        fontName='Helvetica-Bold'
+    )
+    
+    question_style = ParagraphStyle(
+        'QuestionStyle',
+        parent=styles['Heading2'],
+        fontSize=14,
+        textColor=HexColor('#2c3e50'),
+        spaceAfter=12,
+        spaceBefore=12,
+        fontName='Helvetica-Bold'
+    )
+    
+    option_style = ParagraphStyle(
+        'OptionStyle',
+        parent=styles['Normal'],
+        fontSize=11,
+        leftIndent=20,
+        spaceAfter=6,
+        textColor=HexColor('#34495e')
+    )
+    
+    answer_style = ParagraphStyle(
+        'AnswerStyle',
+        parent=styles['Normal'],
+        fontSize=11,
+        textColor=HexColor('#27ae60'),
+        spaceAfter=8,
+        spaceBefore=8,
+        fontName='Helvetica-Bold'
+    )
+    
+    explanation_style = ParagraphStyle(
+        'ExplanationStyle',
+        parent=styles['Normal'],
+        fontSize=10,
+        textColor=HexColor('#7f8c8d'),
+        spaceAfter=20,
+        alignment=TA_JUSTIFY,
+        leftIndent=10,
+        rightIndent=10
+    )
+    
+    # Add title
+    title = Paragraph(f"<b>MCQ Assessment</b>", title_style)
+    elements.append(title)
+    elements.append(Spacer(1, 0.2*inch))
+    
+    # Add PDF name as subtitle
+    subtitle = Paragraph(f"Source: {pdf_name}", styles['Normal'])
+    elements.append(subtitle)
+    elements.append(Spacer(1, 0.3*inch))
+    
+    # Parse and add MCQs
+    questions = re.split(r'Question \d+:', mcqs_text)
+    questions = [q.strip() for q in questions if q.strip()]
+    
+    for idx, question_block in enumerate(questions, 1):
+        # Split into components
+        lines = question_block.strip().split('\n')
+        
+        question_text = ""
+        options = []
+        answer = ""
+        explanation = ""
+        
+        current_section = "question"
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+                
+            if line.startswith("Answer:"):
+                current_section = "answer"
+                answer = line.replace("Answer:", "").strip()
+                continue
+            
+            if line.startswith("Explanation:"):
+                current_section = "explanation"
+                explanation = line.replace("Explanation:", "").strip()
+                continue
+            
+            if re.match(r'^[A-D]\.', line):
+                options.append(line)
+                continue
+            
+            if current_section == "question":
+                question_text += line + " "
+            elif current_section == "explanation":
+                explanation += " " + line
+        
+        # Add question
+        q_para = Paragraph(f"<b>Question {idx}:</b> {question_text.strip()}", question_style)
+        elements.append(q_para)
+        elements.append(Spacer(1, 0.1*inch))
+        
+        # Add options
+        for option in options:
+            opt_para = Paragraph(option, option_style)
+            elements.append(opt_para)
+        
+        elements.append(Spacer(1, 0.1*inch))
+        
+        # Add answer
+        if answer:
+            ans_para = Paragraph(f"<b>Correct Answer:</b> {answer}", answer_style)
+            elements.append(ans_para)
+        
+        # Add explanation
+        if explanation:
+            exp_para = Paragraph(f"<b>Explanation:</b> {explanation.strip()}", explanation_style)
+            elements.append(exp_para)
+        
+        # Add separator
+        elements.append(Spacer(1, 0.2*inch))
+    
+    # Build PDF
+    doc.build(elements)
+    
+    # Get the PDF data
+    pdf_data = buffer.getvalue()
+    buffer.close()
+    
+    return pdf_data
 
 def determine_optimal_extraction_strategy(pdf_file):
     """Automatically determine the best extraction strategy based on PDF properties."""
@@ -1417,9 +1752,14 @@ def main():
         # Model selection based on provider
         if active_provider == "groq":
             model = st.selectbox("Groq Model", 
-                              options=["llama3-70b-8192", "mixtral-8x7b-32768", "gemma-7b-it"], 
+                              options=[
+                                  "llama-3.3-70b-versatile",
+                                  "llama-3.1-8b-instant",
+                                  "moonshotai/kimi-k2-instruct-0905",
+                                  
+                              ], 
                               index=0,
-                              help="Select the Groq model to use")
+                              help="Select the Groq model to use. All models are officially supported and fully working.")
             # Update the MODEL variable based on user selection
             MODEL = model
             
@@ -1504,42 +1844,120 @@ def main():
                                 help="Larger values may cause API errors for rate limits")
             CHUNK_SIZE = chunk_size
     
-    # File uploader for multiple PDFs
-    uploaded_files = st.file_uploader(
-        "Upload PDF files", 
-        type="pdf", 
-        accept_multiple_files=True,
-        help="Upload academic PDFs containing the content for which you want to generate MCQs."
-    )
+    # Auto-connect to MongoDB silently in background
+    if MONGODB_AVAILABLE and not st.session_state.mongodb_auto_connect_tried:
+        if connect_to_mongodb(st.session_state.mongodb_uri):
+            logger.info("Auto-connected to MongoDB")
+        st.session_state.mongodb_auto_connect_tried = True
+        
     
-    if uploaded_files:
-        st.info(f"📁 {len(uploaded_files)} file(s) uploaded")
+    # Create two columns for main content and history
+    main_col, history_col = st.columns([2, 1])
+    
+    with main_col:
+        # File uploader for multiple PDFs
+        uploaded_files = st.file_uploader(
+            "Upload PDF files", 
+            type="pdf", 
+            accept_multiple_files=True,
+            help="Upload academic PDFs containing the content for which you want to generate MCQs."
+        )
+    
+    with history_col:
+        # My PDF Questions Section
+        st.markdown("### 📚 My PDF Questions")
         
-        with st.expander("PDF Processing Settings", expanded=False):
-            st.info("The app will automatically determine the optimal processing strategy based on your PDF.")
+        if st.session_state.mongodb_connected:
+            # Load previous MCQs
+            previous_mcqs = load_mcqs_from_mongodb(limit=10)
             
-            show_advanced = st.checkbox("Show advanced settings", value=False)
-            
-            if show_advanced:
-                timeout_seconds = st.slider("Processing timeout per batch (seconds)", 
-                                          min_value=60, max_value=900, value=300, 
-                                          help="Maximum time to spend processing a single batch of pages")
+            if previous_mcqs:
+                st.info(f"{len(previous_mcqs)} saved sets")
                 
-                extraction_priority = st.radio(
-                    "Extraction priority",
-                    ["Auto (recommended)", "Speed", "Quality"],
-                    index=0,
-                    help="Auto will balance speed and quality based on PDF type"
-                )
+                # Refresh button
+                if st.button("🔄 Refresh", use_container_width=True, type="secondary"):
+                    st.rerun()
+                
+                st.markdown("")  # spacing
+                
+                # Display each saved MCQ set
+                for idx, mcq_doc in enumerate(previous_mcqs):
+                    pdf_name = mcq_doc.get('pdf_name', 'Unknown')
+                    difficulty = mcq_doc.get('difficulty', 'N/A')
+                    num_q = mcq_doc.get('num_questions', 'N/A')
+                    date = mcq_doc.get('timestamp', 'N/A')[:10]
+                    
+                    # Compact display
+                    with st.container():
+                        st.markdown(f"**{pdf_name}**")
+                        st.caption(f"🔥 {difficulty} | 📝 {num_q}Q | 📅 {date}")
+                        
+                        # View button
+                        if st.button(f"View", key=f"view_{idx}", use_container_width=True):
+                            st.session_state['selected_mcq'] = mcq_doc
+                            st.session_state['show_history_mcq'] = True
+                        
+                        st.markdown("---")
             else:
-                timeout_seconds = 300  # Default
-                extraction_priority = "Auto (recommended)"
-        
-        # Process button
-        if st.button("Generate MCQs", type="primary"):
-            with st.spinner("Processing PDFs and generating MCQs..."):
-                # Extract text from PDFs with automatic strategy
-                pdf_contents = {}
+                st.info("📂 No saved MCQs")
+        else:
+            st.info("⚠️ Not connected")
+            st.caption("Check .env file")
+    
+    # Display selected MCQ from history in main area
+    if st.session_state.get('show_history_mcq', False) and st.session_state.get('selected_mcq'):
+        with main_col:
+            mcq_doc = st.session_state['selected_mcq']
+            st.markdown("---")
+            st.subheader(f"📚 {mcq_doc.get('pdf_name', 'Unknown')}")
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Difficulty", mcq_doc.get('difficulty', 'N/A'))
+            with col2:
+                st.metric("Questions", mcq_doc.get('num_questions', 'N/A'))
+            with col3:
+                st.metric("Date", mcq_doc.get('timestamp', 'N/A')[:10])
+            
+            if st.button("✖️ Close"):
+                st.session_state['show_history_mcq'] = False
+                st.rerun()
+            
+            st.markdown("---")
+            
+            mcqs_text = mcq_doc.get('mcqs_text', '')
+            if mcqs_text:
+                format_mcqs_for_display(mcqs_text)
+    
+    with main_col:
+        if uploaded_files:
+            st.info(f"📚 {len(uploaded_files)} file(s) uploaded")
+            
+            with st.expander("PDF Processing Settings", expanded=False):
+                st.info("The app will automatically determine the optimal processing strategy based on your PDF.")
+                
+                show_advanced = st.checkbox("Show advanced settings", value=False)
+                
+                if show_advanced:
+                    timeout_seconds = st.slider("Processing timeout per batch (seconds)", 
+                                              min_value=60, max_value=900, value=300, 
+                                              help="Maximum time to spend processing a single batch of pages")
+                    
+                    extraction_priority = st.radio(
+                        "Extraction priority",
+                        ["Auto (recommended)", "Speed", "Quality"],
+                        index=0,
+                        help="Auto will balance speed and quality based on PDF type"
+                    )
+                else:
+                    timeout_seconds = 300  # Default
+                    extraction_priority = "Auto (recommended)"
+            
+            # Process button
+            if st.button("Generate MCQs", type="primary"):
+                with st.spinner("Processing PDFs and generating MCQs..."):
+                    # Extract text from PDFs with automatic strategy
+                    pdf_contents = {}
                 
                 for pdf_file in uploaded_files:
                     try:
@@ -1652,39 +2070,72 @@ def main():
                                     mcqs = generate_mcqs(content, num_questions, difficulty)
                                 
                                 if not mcqs.startswith("Error"):
-                                    st.subheader("📝 Generated MCQs")
-                                    st.markdown(mcqs)
+                                    st.success("✅ MCQs generated successfully!")
                                     
-                                    # Add download button for MCQs
-                                    st.download_button(
-                                        label="⬇️ Download MCQs",
-                                        data=mcqs,
-                                        file_name=f"MCQs_{pdf_name.replace('.pdf', '')}.txt",
-                                        mime="text/plain"
-                                    )
+                                    # Save to MongoDB if connected
+                                    if st.session_state.mongodb_connected:
+                                        if save_mcqs_to_mongodb(pdf_name, mcqs, num_questions, difficulty):
+                                            st.success("💾 Saved to MongoDB!")
+                                        else:
+                                            st.warning("⚠️ Could not save to MongoDB")
+                                    
+                                    st.markdown("---")
+                                    
+                                    # Display formatted MCQs
+                                    st.subheader("📝 Generated MCQs")
+                                    format_mcqs_for_display(mcqs)
+                                    
+                                    # Create two columns for download buttons
+                                    col1, col2 = st.columns(2)
+                                    
+                                    with col1:
+                                        # Text download button
+                                        st.download_button(
+                                            label="📄 Download as Text",
+                                            data=mcqs,
+                                            file_name=f"MCQs_{pdf_name.replace('.pdf', '')}.txt",
+                                            mime="text/plain",
+                                            use_container_width=True
+                                        )
+                                    
+                                    with col2:
+                                        # PDF download button
+                                        try:
+                                            pdf_data = generate_pdf_from_mcqs(mcqs, pdf_name)
+                                            st.download_button(
+                                                label="📕 Download as PDF",
+                                                data=pdf_data,
+                                                file_name=f"MCQs_{pdf_name.replace('.pdf', '')}.pdf",
+                                                mime="application/pdf",
+                                                use_container_width=True,
+                                                type="primary"
+                                            )
+                                        except Exception as e:
+                                            st.error(f"Error generating PDF: {str(e)}")
+                                            logger.error(f"PDF generation error: {str(e)}", exc_info=True)
                                 else:
                                     st.error(mcqs)
                             else:
                                 st.warning(f"⚠️ The content extracted from {pdf_name} is too short to generate meaningful MCQs.")
                 else:
                     st.error("❌ Failed to extract content from any of the uploaded PDFs. Please try different PDF files.")
-    else:
-        st.info("Please upload PDF files to get started.")
-        
-        # Example section
-        with st.expander("See Example"):
-            st.markdown("""
-            **Example MCQs:**
+        else:
+            st.info("Please upload PDF files to get started.")
             
-            **Question 1:** Which data structure operates on a Last-In-First-Out (LIFO) principle?
-            A. Queue
-            B. Stack
-            C. Linked List
-            D. Binary Tree
-            
-            **Answer:** B. Stack
-            **Explanation:** A stack follows the LIFO principle where the last element inserted is the first one to be removed.
-            """)
+            # Example section
+            with st.expander("See Example"):
+                st.markdown("""
+                **Example MCQs:**
+                
+                **Question 1:** Which data structure operates on a Last-In-First-Out (LIFO) principle?
+                A. Queue
+                B. Stack
+                C. Linked List
+                D. Binary Tree
+                
+                **Answer:** B. Stack
+                **Explanation:** A stack follows the LIFO principle where the last element inserted is the first one to be removed.
+                """)
     
     # Add attribution footer
     st.markdown("---")
